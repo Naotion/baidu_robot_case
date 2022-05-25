@@ -1,0 +1,244 @@
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
+
+from datetime import timedelta
+import datetime
+import time
+# import urllib
+from urllib import parse
+# import urllib.parse
+import requests
+import json
+
+
+# 获取近期修改过的case_id列表
+def get_case_inf(page=1, maxRecords=50, last_modify_time='currentDay'):
+
+    url = "http://icafeapi.baidu-int.com/api/spaces/MRDR/cards"
+    payload = {
+        "u": "v_liushiyao01",
+        "pw": parse.unquote('VVVSGv6H2P2VbwJpuG8N1Sm%2F3bV5v4odfVv'),
+        'iql': '原因分析 ~【感知 and 最后修改时间 ={}'.format(last_modify_time),
+        'showDetail': False,
+        'page': page,
+        # 最大case数量默认为50，方便后面去请求修改记录时分组
+        'maxRecords': maxRecords
+    }
+    response = requests.get(url, params=payload)
+    result = json.loads(response.text)
+    number = result.get('total')
+    case = result['cards']
+    page_size = result['pageSize']
+    case_id = []
+    for id in case:
+        case_id.append(id['sequence'])
+    return number, page_size, case_id
+
+
+# 获取本周当前感知的待看case数量
+def get_case_number(pw,min_time, max_time):
+
+    url = "http://icafeapi.baidu-int.com/api/spaces/MRDR/cards"
+
+    payload = {
+        "u": "v_liushiyao01",
+        "pw": pw,
+        'iql': '问题时间点 > {} AND 问题时间点 < {} AND 模块 = 感知 AND 原因分析 !~ 【感知】 AND 车辆ID not in (MKZ059,MKZ060,MKZ051,MKZ078,MKZ165,MKZ225) AND 是否接管 in (人工接管,退出自动驾驶) AND 问题类别 is empty AND 标题 !~ lite'.format(min_time, max_time),
+        'showDetail': False
+    }
+    response = requests.get(url, params=payload)
+    result = json.loads(response.text)
+    number = result.get('total')
+    return number
+
+
+def get_case_id_list(case_list=[]):
+
+    print("共有case{}个".format(get_case_inf()[0]))
+    for page in range(1, get_case_inf()[1] + 1):
+        # 单个IP或用户名请求限制每秒5次
+        if page % 5 == 0:
+            time.sleep(1)
+            case_list.append(get_case_inf(page=page)[2])
+            print('正在读取第{}页case id'.format(page))
+        else:
+            case_list.append(get_case_inf(page=page)[2])
+            print('正在读取第{}页case id'.format(page))
+    print(case_list)
+    return case_list
+
+
+# 定义一个不纳入计算case数量的规则列表
+remove_list = ['暂无log', '落盘']
+
+
+# 定义一个不纳入计算case数量的方法
+def remove_case(remove_list,str1):
+    for words in remove_list:
+        # 如果str1中包含不计入case规则字样，就结束这个循环程序,返回空值
+        if words in str1:
+            return
+    # 循环结束后，str1中不包含不计入case统计规则字样，返回str1字段
+    return str1
+
+
+# 请求曾经修改过case的人员名单
+def get_case(username, pw, case_id, address_list, list1=[]):
+
+    """
+    :param username: 用户名
+    :param pw: 虚拟登录密码
+    :param case_id: case的编号，必须是列表类型
+    :return:返回值为近期修改过case的人员名单，列表类型
+    """
+    url = "http://icafeapi.baidu-int.com/api/v2/space/MRDR/issue/history"
+    body = {
+        "username": username,
+        "password": pw,
+        "sequences": case_id
+    }
+
+    result = requests.post(url=url, data=json.dumps(body))
+    result = json.loads(result.text)
+    # 定义一个空的字典
+    # dict_case = {}
+    # 不确定是否会报错
+    try:
+        for i in result['result']:
+            str_reason = ''
+            dict1 = {}
+            for j in i['histories']:
+                if j:
+                    try:
+                        if j['diffDescriptionStructured'][0]['fieldName'] == '原因分析':
+                            if j['operator'] in address_list:
+                                # 对原因分析修改后的内容进行筛选，刨除掉不计入case数量统计的原因分析内容
+                                if remove_case(remove_list, j['diffDescriptionStructured'][0]['newValue']):
+                                    # str_reason = str_reason + j['diffDescriptionStructured'][0]['newValue']
+                                    dict1.update({
+                                        j['operator']: {
+                                            'case_id': j['sequence'],
+                                            'operator': j['operator'],
+                                            'modify_time': j['operationTime'],
+                                            'title': j['title'],
+                                            'reason': j['diffDescriptionStructured'][0]['newValue']}})
+                    except(IndexError):
+                        print("j['diffDescriptionStructured']字段内容为空")
+            # 如果当前case里无人员，不传入参数
+            if dict1:
+                # 浅拷贝一下字典，防止之后字典数值更新，list内容发生变化
+                list1.append(dict1.copy())
+    # 参数规则异常处理
+    except(KeyError):
+        print('keyerror！输入参数有误')
+        print(result['status'])
+
+    return list1
+
+
+# 群消息通知机器人
+def case_robot(content, toid):
+
+    webhook = "http://apiin.im.baidu.com/api/msg/groupmsgsend?access_token=dd915bbd148f6950567fa73bb9a112884"
+    header = {
+        # "Cache-Control": "max-age=0",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "message": {
+            "header": {
+                "toid": toid
+            },
+            "body": [{
+                "content": content,
+                "type": "TEXT"
+            }]
+        }
+    }
+
+    a = requests.post(webhook, data=json.dumps(data), headers=header)
+    print(a.text)
+
+
+# 名字&邮箱地址
+address_list = {
+    # "v_fengchendi": "冯晨笛",
+    # "v_chengxinyu": "程新宇",
+    "v_yanghaifei": "杨海飞",
+    "v_wangwei51": "王   卫",
+    "v_chengjintao": "程金涛",
+    "v_liushiyao01": "刘士尧",
+    # "v_wangwenjia": "王文佳",
+    # "v_fanhaoxin": "范浩鑫",
+    #  "v_lihaiqi": "李海琦"
+}
+
+
+url = "http://icafeapi.baidu-int.com/api/v2/space/MRDR/issue/history"
+username = "v_liushiyao01"
+pw = parse.unquote('VVVSGv6H2P2VbwJpuG8N1Sm%2F3bV5v4odfVv')
+
+# 定义一个不纳入计算case数量的规则列表
+remove_list = ['暂无log', '落盘', '报警类问题', '楼盘']
+
+currentDay = datetime.date.today()
+currentTime = datetime.datetime.now()
+
+print("当前日期为：{}".format(currentDay))
+print(currentTime)
+
+list_case = []
+list1 = []
+
+# 开始第一步，检测是否接入内网，然后在开始查询
+try:
+    get_case_id_list(list_case)
+except(requests.exceptions.ConnectionError):
+    print("您的电脑未接入内网，请先接入内网")
+
+# 添加一个计数器
+n = 0
+for case_id in list_case:
+    n += 1
+    print("正在请求第{}页case修改记录".format(n))
+    # 针对单个IP的所有API调用，晚9点~早9点：5秒25次，早9点~晚9点：5秒10次
+    if n % 10 == 0:
+        time.sleep(5)
+    else:
+        get_case(username, pw, case_id, address_list, list1=list1)
+
+robot_str = "当前日期为："+str(currentDay)+"\n"
+
+# 获取本周感知待看case数量
+weekday = currentDay.weekday()
+# 本周最早时间,上周五
+min_time = currentDay + timedelta(days=-(3+weekday))
+# 本周最晚时间，本周五
+max_time = currentDay + timedelta(days=(4-weekday))
+
+case_str = '本周[{}~{}]感知待分析case剩余：{}'.format(min_time, max_time, get_case_number(pw,min_time, max_time))
+print(case_str)
+# 将每条提示内容拼接起来
+robot_str = robot_str + case_str + "\n" + "\n" + "今日Case分析更新数量：" + "\n"
+
+# 开始查询每个人 今日Case分析更新数量
+for user in address_list:
+    n = 0
+    for i in list1:
+        if user in i:
+            if i.get(user)['modify_time'] > str(currentDay):
+                print(i.get(user))
+                # robot_str = robot_str+str(i.get(user))+"\n"
+                n += 1
+    print('{}今日看了{}case'.format(address_list[user], n))
+    robot_str = robot_str + '{}:\t{}'.format(address_list[user], n)+"\n"
+
+print("========================================")
+print(robot_str)
+# case_robot(robot_str, toid=[6435879])
+
+# refuse = input("您是否确认发送群聊:")
+# if refuse == "是":
+#     case_robot(robot_str, toid=[6435879, 6289644])
+# else:
+#     print("程序运行结束")
